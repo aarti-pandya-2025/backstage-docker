@@ -1,0 +1,74 @@
+# The purpose of this image is to serve the frontend app content separately.
+# By default the Backstage backend uses the app-backend plugin to serve the
+# app from the backend itself, but it may be desirable to move the frontend
+# content serving to a separate deployment, in which case this image can be
+# used.
+
+# This dockerfile also performs the build first inside docker. This may come
+# with a build time impact, but is sometimes desirable. If you want to run the
+# build on the host instead, use the file simply named Dockerfile in this folder
+# instead.
+
+# USAGE:
+#
+# - Copy this file and the "docker" folder from this directory to your project
+#   root
+#
+# - Update your .dockerignore, make sure that the source folders are not
+#   excluded, but do exclude node_modules and build artifacts:
+#
+#       .git
+#       node_modules
+#       packages/*/dist
+#       packages/*/node_modules
+#       plugins/*/dist
+#       plugins/*/node_modules
+#
+# - Update the copy of this file to add configuration arguments to the "build"
+#   command, for example:
+#
+#       RUN yarn workspace app build --config <config1> --config <config2> ...
+#
+# - In your project root, run:
+#
+#       docker build -t backstage-frontend -f Dockerfile.dockerbuild .
+
+
+
+FROM node:18.20.4-bookworm-slim AS build
+
+RUN mkdir /app
+
+ARG ARTIFACTORY_TOKEN
+ENV CYPRESS_INSTALL_BINARY=0
+
+RUN --mount=type=cache,target=/home/cloud-user/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/home/cloud-user/var/lib/apt,sharing=locked \
+    apt-get update && \
+    apt-get install -y --no-install-recommends python3 build-essential ca-certificates python3-pip python3-venv && \
+    yarn config set python /usr/bin/python3
+COPY . /app
+WORKDIR /app
+ARG ARTIFACTORY_TOKEN
+
+# Replace placeholders in the .npmrc file with the token
+RUN yarn install
+RUN yarn workspace app build
+
+
+
+FROM nginx:mainline
+
+RUN apt-get update && apt-get -y install jq && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build --chmod=0755 /app/packages/app/dist /usr/share/nginx/html
+COPY --chmod=0755 docker/default.conf.template /etc/nginx/templates/default.conf.template
+
+COPY --chmod=0755 docker/inject-config.sh /docker-entrypoint.d/40-inject-config.sh
+# RUN chmod +x /docker-entrypoint.d/40-inject-config.sh
+
+RUN chmod g+rwx /var/cache/nginx /var/run /var/log/nginx
+
+RUN chmod g+rwx -R /etc/nginx/conf.d /usr/share/nginx/html/static
+
+ENV PORT 8080
